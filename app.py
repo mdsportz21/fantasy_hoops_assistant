@@ -119,8 +119,8 @@ with c1:
 with c2:
     fa_upload = st.file_uploader("Free agents CSV", type="csv", key="free_agents")
 
-roster_raw = read_csv_upload(roster_upload, "roster.csv")
-fa_raw = read_csv_upload(fa_upload, "free_agents.csv")
+roster_raw = read_csv_upload(roster_upload, "output/roster.csv")
+fa_raw = read_csv_upload(fa_upload, "output/free_agents.csv")
 roster = clean_and_parse(roster_raw, True)
 free_agents = clean_and_parse(fa_raw, False)
 
