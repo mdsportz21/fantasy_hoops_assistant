@@ -1,6 +1,6 @@
 # Fantasy Hoops Add/Drop Assistant
 
-A personal-use Streamlit prototype for a Yahoo NBA 9-category league. Yahoo exports supply your roster/free-agent list, and an optional RotoBaller projection export improves the add/drop comparison.
+A personal-use Streamlit helper for a Yahoo NBA 9-category league. Recommendations now use **RotoBaller overall rankings directly** instead of a custom category-weighted heuristic.
 
 ## Run locally
 
@@ -11,29 +11,30 @@ streamlit run app.py
 
 ## Files
 
-- `roster.csv`: example/current Yahoo roster export.
-- `free_agents.csv`: example/current Yahoo free-agent export.
-- `export_rotoballer_projections.js`: paste into Chrome DevTools Console while the RotoBaller NBA projections table is visible.
-- `projections_template.csv`: header template for the optional projections upload.
+- `roster.csv`: Yahoo roster export (example/current data).
+- `free_agents.csv`: Yahoo free-agent export (example/current data).
+- `export_rotoballer_projections.js`: exports RotoBaller overall rank, position rank, and projections from the page's player cards.
+- `projections_template.csv`: example of the required ranking CSV columns.
 
-## Import RotoBaller projections
+## Refresh RotoBaller ranks
 
 1. Open the RotoBaller NBA rankings/projections page: https://www.rotoballer.com/fantasy-basketball-rankings-projections-nba
-2. Make sure the player projections table is visible and set to projections.
+2. Select **Proj**, not **Stats**, and wait for the player cards to load.
 3. Open Chrome DevTools → Console.
-4. Paste the contents of `export_rotoballer_projections.js` and run it. It copies a CSV to your clipboard.
-5. Paste the clipboard into a plain-text editor and save it as `rotoballer_projections.csv` (ensure the file is saved as CSV, not rich text).
-6. In the Streamlit app, upload that file in **RotoBaller projections CSV (optional)**.
+4. Paste the contents of `export_rotoballer_projections.js` and run it. It copies CSV to the clipboard.
+5. Paste the clipboard into a plain-text editor and save as `rotoballer_projections.csv`.
+6. Upload that file in the app's **RotoBaller rankings CSV** field.
 
-The expected columns are `player_name, PTS, REB, AST, STL, BLK, 3PM, FG%, FT%, TO`. The app accepts `3PM` or `3PTM`. Update the CSV whenever you want to refresh projections. If the site changes its table layout and the exporter cannot find the table, inspect the table headers shown in the browser console.
+The CSV must include `player_name` and `overall_rank`. The supplied exporter also includes `position`, `position_rank`, and the projection statistics. Players with no projection data are skipped and shown as unranked if they appear in the Yahoo roster/free-agent list.
 
-## How projections are used
+## How recommendations work
 
-- Projected per-game counting stats (3PM, PTS, REB, AST, STL, BLK, TO) are used for players matched by normalized name.
-- RotoBaller FG% and FT% are used as projected rates. Because the public table does not include projected FGM/FGA and FTM/FTA in the displayed columns, Yahoo-export FGA/FTA are used as approximate volume weights for team percentage impact.
-- If a player does not match the projection CSV, the app falls back to that player's parsed Yahoo export stats. The app shows match counts and warns about unmatched players.
-- Without an uploaded projections file, the app retains its original Yahoo-stat heuristic.
+- Lower overall rank numbers are better. A free agent ranked 35 beats a roster player ranked 80 by 45 places.
+- The app compares every ranked free agent against every ranked roster player and shows pairs meeting the selected minimum rank improvement (default 10 places).
+- You can download the complete set of qualifying add/drop pairs as CSV.
+- Players without a RotoBaller overall rank are listed separately and are not treated as the worst players.
+- Player matching normalizes punctuation, suffixes, and accents (for example, `Moussa Diabaté` matches `Moussa Diabate`).
 
-## Important limitations
+## Limitations
 
-This is a heuristic add/drop helper, not a validated projection or matchup model. Check the RotoBaller projection update date, confirm player-name matching, and verify Yahoo's exported stats view before acting. The current score is a rough comparison of per-game category differences; it does not fully model games played, injuries, weekly schedule, roster limits, or category standings. Use it as decision support, not an automatic roster decision.
+This is a simple ranking comparison, not a category-needs or matchup model. It does not account for injuries, games played, weekly schedule, league category standings, or roster constraints. Verify the ranking view and update date before making a move.

@@ -7,10 +7,10 @@ import streamlit as st
 
 st.set_page_config(page_title="Fantasy Hoops Add/Drop Assistant", layout="wide")
 st.title("Fantasy Hoops Add/Drop Assistant")
-st.caption("Yahoo 9-category league · RotoBaller projection-aware add/drop assistant")
+st.caption("Yahoo 9-category league · RotoBaller overall-rank add/drop radar")
 
 ROOT = Path(__file__).parent
-CATEGORIES = ["FG%", "FT%", "3PTM", "PTS", "REB", "AST", "STL", "BLK", "TO"]
+
 
 def read_csv_upload(uploaded, default_name):
     if uploaded is not None:
@@ -20,9 +20,9 @@ def read_csv_upload(uploaded, default_name):
         return pd.read_csv(path, dtype=str).fillna("")
     return pd.DataFrame()
 
+
 def parse_player_row(row):
-    """Parse a single Yahoo row_data string using shooting-attempt cells as anchors."""
-    # pandas Series.apply passes each cell value (a string), not the entire row.
+    """Parse Yahoo's exported row_data, used only for roster context."""
     raw = str(row if row is not None else "")
     cells = [x.strip() for x in raw.replace("\r", "\n").replace("\n", " | ").split("|")]
     cells = [re.sub(r"\s+", " ", x).strip() for x in cells]
@@ -40,16 +40,14 @@ def parse_player_row(row):
         if len(tail) != 7:
             return None
         threes, pts, reb, ast, stl, blk, tov = tail
-        return {
-            "FGM": fgm, "FGA": fga, "FG%": fg_pct,
-            "FTM": ftm, "FTA": fta, "FT%": ft_pct,
-            "3PTM": threes, "PTS": pts, "REB": reb, "AST": ast,
-            "STL": stl, "BLK": blk, "TO": tov,
-        }
+        return {"FGM": fgm, "FGA": fga, "FG%": fg_pct, "FTM": ftm, "FTA": fta,
+                "FT%": ft_pct, "3PTM": threes, "PTS": pts, "REB": reb,
+                "AST": ast, "STL": stl, "BLK": blk, "TO": tov}
     except (ValueError, IndexError):
         return None
 
-def clean_and_parse(df, is_roster=False):
+
+def clean_and_parse(df):
     if df.empty:
         return pd.DataFrame()
     df = df.copy().fillna("")
@@ -61,145 +59,76 @@ def clean_and_parse(df, is_roster=False):
     df = df[(df.player_name != "") & (df.player_name.str.lower() != "player_name")]
     df = df[(df.yahoo_id != "") & (df.yahoo_id.str.lower() != "yahoo_id")]
     df = df.drop_duplicates(subset=["yahoo_id"], keep="first")
-    parsed = df["row_data"].apply(parse_player_row)
-    stats = pd.DataFrame(parsed.tolist(), index=df.index)
+    stats = pd.DataFrame(df["row_data"].apply(parse_player_row).tolist(), index=df.index)
     out = pd.concat([df, stats], axis=1)
-    out = out[out["PTS"].notna()] if "PTS" in out.columns else out.iloc[0:0]
+    if "PTS" in out.columns:
+        out = out[out["PTS"].notna()]
     if "roster_slot" not in out.columns:
         out["roster_slot"] = ""
     return out.reset_index(drop=True)
 
-# def normalized_name(value):
-#     value = str(value or "").lower().strip()
-#     value = re.sub(r"[^a-z0-9 ]", "", value)
-#     value = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", value)
-#     return re.sub(r"\s+", " ", value).strip()
 
-def normalized_name(name):
-    """Normalize player names for matching across Yahoo and RotoBaller."""
-    if not name:
-        return ""
+def normalized_name(value):
+    value = unicodedata.normalize("NFKD", str(value or ""))
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = value.lower().strip().replace("&", "and")
+    value = re.sub(r"[^a-z0-9 ]", "", value)
+    value = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", value)
+    return re.sub(r"\s+", " ", value).strip()
 
-    # Convert accented characters to their unaccented equivalents.
-    name = unicodedata.normalize("NFKD", str(name))
-    name = "".join(
-        char for char in name
-        if not unicodedata.combining(char)
-    )
 
-    name = name.lower().strip()
-    name = name.replace("&", "and")
-    name = re.sub(r"[^a-z0-9\s]", "", name)
-    name = re.sub(r"\s+", " ", name)
-
-    # Remove common suffixes.
-    name = re.sub(r"\s+(jr|sr|ii|iii|iv|v)$", "", name)
-
-    return name.strip()
-
-def pct_to_ratio(value):
-    try:
-        number = float(str(value).replace("%", "").strip())
-        return number / 100 if number > 1 else number
-    except (TypeError, ValueError):
-        return float("nan")
-
-def load_projections(uploaded, raw):
+def load_rankings(uploaded, raw):
     if uploaded is None and raw is None:
         return pd.DataFrame()
     try:
-        proj = pd.read_csv(uploaded, dtype=str).fillna("") if uploaded is not None else raw
+        df = pd.read_csv(uploaded, dtype=str).fillna("") if uploaded is not None else raw
     except Exception as exc:
-        st.error(f"Could not read projections CSV: {exc}")
+        st.error(f"Could not read RotoBaller CSV: {exc}")
         return pd.DataFrame()
-    # Accept common RotoBaller header variants.
     aliases = {
-        "player": "player_name", "name": "player_name", "player name": "player_name", "player_name": "player_name",
-        "3pm": "3PTM", "3ptm": "3PTM", "three pointers": "3PTM",
-        "pts": "PTS", "reb": "REB", "ast": "AST", "stl": "STL",
-        "blk": "BLK", "to": "TO", "fg%": "FG%", "ft%": "FT%"
+        "player": "player_name", "name": "player_name", "player name": "player_name",
+        "player_name": "player_name", "rank": "overall_rank", "overall rank": "overall_rank",
+        "overall_rank": "overall_rank", "pos": "position", "position": "position",
+        "p-rank": "position_rank", "position rank": "position_rank", "position_rank": "position_rank",
     }
     rename = {}
-    for col in proj.columns:
+    for col in df.columns:
         key = re.sub(r"\s+", " ", str(col).strip().lower())
         if key in aliases:
             rename[col] = aliases[key]
-    proj = proj.rename(columns=rename)
-    needed = ["player_name", "PTS", "REB", "AST", "STL", "BLK", "3PTM", "FG%", "FT%", "TO"]
-    missing = [c for c in needed if c not in proj.columns]
-    if missing:
-        st.error("Projections CSV is missing required columns: " + ", ".join(missing))
-        st.caption("Expected columns: player_name, PTS, REB, AST, STL, BLK, 3PTM, FG%, FT%, TO. RotoBaller's 3PM column is accepted as 3PTM.")
+    df = df.rename(columns=rename)
+    if "player_name" not in df.columns or "overall_rank" not in df.columns:
+        st.error("The RotoBaller CSV needs player_name and overall_rank columns. Re-run the updated exporter and upload its new CSV.")
         return pd.DataFrame()
-    proj = proj[needed].copy()
-    proj["_name_key"] = proj["player_name"].map(normalized_name)
-    for col in ["PTS", "REB", "AST", "STL", "BLK", "3PTM", "TO"]:
-        proj[col] = pd.to_numeric(proj[col].astype(str).str.replace(",", "", regex=False), errors="coerce")
-    for col in ["FG%", "FT%"]:
-        proj[col] = proj[col].map(pct_to_ratio)
-    proj = proj[proj["_name_key"].ne("")].drop_duplicates("_name_key", keep="last")
-    return proj
+    df["overall_rank"] = pd.to_numeric(df["overall_rank"].astype(str).str.replace("#", "", regex=False), errors="coerce")
+    df = df[df["player_name"].astype(str).str.strip().ne("") & df["overall_rank"].notna()].copy()
+    df["_name_key"] = df["player_name"].map(normalized_name)
+    df = df[df["_name_key"].ne("")].drop_duplicates("_name_key", keep="last")
+    for col in ["position", "position_rank"]:
+        if col not in df.columns:
+            df[col] = ""
+    return df[["player_name", "overall_rank", "position", "position_rank", "_name_key"]]
 
-def pct_impact(add, drop, cat):
-    # Use RotoBaller projected percentages when available. Yahoo attempts are
-    # used as volume weights because the RotoBaller table does not expose makes/attempts.
-    attempt_col = "FGA" if cat == "FG%" else "FTA"
-    old_attempts = roster[attempt_col].sum()
-    def rate(player):
-        projected = player.get(f"proj_{cat}", float("nan"))
-        return float(projected) if pd.notna(projected) else float(player[cat])
-    old_weighted = sum(rate(row) * float(row[attempt_col]) for _, row in roster.iterrows())
-    new_attempts = old_attempts - float(drop[attempt_col]) + float(add[attempt_col])
-    new_weighted = old_weighted - rate(drop) * float(drop[attempt_col]) + rate(add) * float(add[attempt_col])
-    old = old_weighted / old_attempts if old_attempts else 0
-    new = new_weighted / new_attempts if new_attempts else 0
-    return new - old
-
-def player_value(player, cat):
-    projected = player.get(f"proj_{cat}", float("nan"))
-    return float(projected) if pd.notna(projected) else float(player[cat])
 
 st.write(
-    "Upload your latest Yahoo exports and, optionally, a RotoBaller projections CSV. "
-    "When projections are loaded, they drive the counting-stat comparison and projected FG%/FT% rates; Yahoo attempts are used as approximate volume weights for percentages."
+    "Upload your Yahoo roster and free-agent exports plus the RotoBaller rankings CSV. "
+    "Recommendations are based on RotoBaller overall rank: a lower rank number is better. "
+    "The app does not calculate a custom category score."
 )
 c1, c2 = st.columns(2)
 with c1:
-    roster_upload = st.file_uploader("Roster CSV", type="csv", key="roster")
+    roster_upload = st.file_uploader("Yahoo roster CSV", type="csv", key="roster")
 with c2:
-    fa_upload = st.file_uploader("Free agents CSV", type="csv", key="free_agents")
-projection_upload = st.file_uploader("RotoBaller projections CSV (optional)", type="csv", key="projections")
+    fa_upload = st.file_uploader("Yahoo free agents CSV", type="csv", key="free_agents")
+ranking_upload = st.file_uploader("RotoBaller rankings CSV (must include overall_rank)", type="csv", key="rankings")
 
 roster_raw = read_csv_upload(roster_upload, "output/roster.csv")
 fa_raw = read_csv_upload(fa_upload, "output/free_agents.csv")
-projection_raw = read_csv_upload(projection_upload, "output/rotoballer_projections.csv")
-roster = clean_and_parse(roster_raw, True)
-free_agents = clean_and_parse(fa_raw, False)
-projections = load_projections(projection_upload, projection_raw)
+ranking_raw = read_csv_upload(ranking_upload, "output/rotoballer_projections.csv")
+roster = clean_and_parse(roster_raw)
+free_agents = clean_and_parse(fa_raw)
+rankings = load_rankings(ranking_upload, ranking_raw)
 
-if not projections.empty:
-    proj_rename = {cat: f"proj_{cat}" for cat in CATEGORIES}
-    projections = projections.rename(columns=proj_rename)
-    proj_cols = [f"proj_{cat}" for cat in CATEGORIES]
-    if not roster.empty:
-        roster["_name_key"] = roster["player_name"].map(normalized_name)
-        roster = roster.merge(projections[["_name_key"] + proj_cols], on="_name_key", how="left")
-    if not free_agents.empty:
-        free_agents["_name_key"] = free_agents["player_name"].map(normalized_name)
-        free_agents = free_agents.merge(projections[["_name_key"] + proj_cols], on="_name_key", how="left")
-    roster_matches = int(roster["proj_PTS"].notna().sum()) if not roster.empty else 0
-    free_agent_matches = int(free_agents["proj_PTS"].notna().sum()) if not free_agents.empty else 0
-    st.success(f"RotoBaller projections loaded: matched {roster_matches}/{len(roster)} roster players and {free_agent_matches}/{len(free_agents)} free agents by normalized name.")
-    if roster_matches < len(roster) or free_agent_matches < len(free_agents):
-        st.warning("Some players did not match RotoBaller names and will fall back to Yahoo-export stats. Review spelling/suffixes if important players are unmatched.")
-        print(f'projection names: {projections['player_name'].tolist()}')
-        roster_nonmatches = roster[roster['proj_PTS'].isna()]['player_name'].tolist()
-        print(f'roster nonmatches: {roster_nonmatches}')
-        free_agent_nonmatches = free_agents[free_agents['proj_PTS'].isna()]['player_name'].tolist()
-        print(f'free agent nonmatches: {free_agent_nonmatches}')
-
-
-# Keep only players whose IDs are not already on the roster.
 if not roster.empty and not free_agents.empty:
     roster_ids = set(roster["yahoo_id"].astype(str))
     free_agents = free_agents[~free_agents["yahoo_id"].astype(str).isin(roster_ids)].copy()
@@ -207,120 +136,77 @@ if not roster.empty and not free_agents.empty:
 m1, m2, m3 = st.columns(3)
 m1.metric("Roster players parsed", len(roster))
 m2.metric("Free agents parsed", len(free_agents))
-m3.metric("Raw free-agent CSV rows", len(fa_raw))
+m3.metric("Ranked players in CSV", len(rankings))
 
 if roster.empty or free_agents.empty:
-    st.warning("Upload CSVs with player_name, yahoo_id, and row_data columns. Make sure each batch is appended under a single header.")
+    st.warning("Upload Yahoo CSVs with player_name, yahoo_id, and row_data columns, or put them beside app.py.")
+    st.stop()
+if rankings.empty:
+    st.info("Upload a RotoBaller CSV exported with the updated script. The CSV must include overall_rank.")
     st.stop()
 
-with st.expander("Parsed roster stats", expanded=False):
-    show_cols = ["player_name", "roster_slot", "FG%", "FT%", "3PTM", "PTS", "REB", "AST", "STL", "BLK", "TO"]
-    st.dataframe(roster[[c for c in show_cols if c in roster.columns]], use_container_width=True, hide_index=True)
-with st.expander("Parsed free-agent stats", expanded=False):
-    show_cols = ["player_name", "FG%", "FT%", "3PTM", "PTS", "REB", "AST", "STL", "BLK", "TO"]
-    st.dataframe(free_agents[[c for c in show_cols if c in free_agents.columns]], use_container_width=True, hide_index=True)
+roster["_name_key"] = roster["player_name"].map(normalized_name)
+free_agents["_name_key"] = free_agents["player_name"].map(normalized_name)
+roster = roster.merge(rankings, on="_name_key", how="left", suffixes=("", "_roto"))
+free_agents = free_agents.merge(rankings, on="_name_key", how="left", suffixes=("", "_roto"))
 
-st.subheader("Your category profile")
-profile = []
-for cat in CATEGORIES:
-    if cat == "FG%":
-        val = roster["FGM"].sum() / roster["FGA"].sum() if roster["FGA"].sum() else 0
-        display = f"{val:.3f} ({roster['FGM'].sum():.1f}/{roster['FGA'].sum():.1f})"
-    elif cat == "FT%":
-        val = roster["FTM"].sum() / roster["FTA"].sum() if roster["FTA"].sum() else 0
-        display = f"{val:.3f} ({roster['FTM'].sum():.1f}/{roster['FTA'].sum():.1f})"
-    else:
-        val = roster[cat].sum()
-        display = f"{val:.1f}" + (" (lower is better)" if cat == "TO" else "")
-    profile.append({"Category": cat, "Roster sum / weighted rate": display})
-st.dataframe(pd.DataFrame(profile), use_container_width=True, hide_index=True)
+roster_matches = int(roster["overall_rank"].notna().sum())
+fa_matches = int(free_agents["overall_rank"].notna().sum())
+st.success(f"RotoBaller rankings loaded: matched {roster_matches}/{len(roster)} roster players and {fa_matches}/{len(free_agents)} free agents.")
+if roster_matches < len(roster) or fa_matches < len(free_agents):
+    st.warning("Players without a RotoBaller overall rank are shown as unranked and are not treated as the worst-ranked players.")
 
-st.subheader("Add/drop shortlist")
-st.caption(
-    "If RotoBaller projections are uploaded, projected per-game counting stats are used where a player match exists. FG%/FT% use projected rates weighted by Yahoo-export FGA/FTA as an approximation; exact projected makes/attempts are not available in the imported RotoBaller table. Without projections, the app falls back to the Yahoo-export stats. TO is lower-is-better."
-)
-st.warning(
-    "Data quality note: Yahoo export rows can include page metadata. Verify the selected Yahoo stats view. RotoBaller projections are matched by normalized player name; unmatched players use Yahoo stats, so check the match counts above."
-)
+with st.expander("Roster with RotoBaller ranks", expanded=False):
+    roster_view = roster[["player_name", "roster_slot", "overall_rank", "position", "position_rank"]].copy()
+    roster_view["overall_rank"] = roster_view["overall_rank"].apply(lambda x: int(x) if pd.notna(x) else None)
+    st.dataframe(roster_view.sort_values("overall_rank", na_position="last"), use_container_width=True, hide_index=True)
 
-# Estimate each category's value in roster context using robust standardization across available player pool.
-pool = pd.concat([roster.assign(_source="roster"), free_agents.assign(_source="free agent")], ignore_index=True)
-directions = {"FG%": 1, "FT%": 1, "3PTM": 1, "PTS": 1, "REB": 1, "AST": 1, "STL": 1, "BLK": 1, "TO": -1}
-raw_cols = {"FG%": "FG%", "FT%": "FT%", "3PTM": "3PTM", "PTS": "PTS", "REB": "REB", "AST": "AST", "STL": "STL", "BLK": "BLK", "TO": "TO"}
-# Use standard deviation across players as a rough scale for unlike categories.
-scales = {}
-for cat, col in raw_cols.items():
-    s = pool.apply(lambda row: player_value(row, cat), axis=1).dropna() if not pool.empty else pd.Series(dtype=float)
-    scales[cat] = float(s.std()) if len(s) > 1 and float(s.std()) > 1e-9 else 1.0
+with st.expander("Highest-ranked available free agents", expanded=False):
+    fa_view = free_agents[["player_name", "overall_rank", "position", "position_rank"]].copy()
+    fa_view["overall_rank"] = fa_view["overall_rank"].apply(lambda x: int(x) if pd.notna(x) else None)
+    st.dataframe(fa_view.sort_values("overall_rank", na_position="last").head(50), use_container_width=True, hide_index=True)
 
-def cat_score(player, cat):
-    return player_value(player, cat) * directions[cat]
-
-# Category preference lets the user emphasize categories they want to win.
-with st.expander("Customize category priorities", expanded=True):
-    priorities = {}
-    cols = st.columns(3)
-    default_priority = {"FG%": 1.0, "FT%": 1.0, "3PTM": 1.0, "PTS": 1.0, "REB": 1.0, "AST": 1.0, "STL": 1.0, "BLK": 1.0, "TO": 1.0}
-    for i, cat in enumerate(CATEGORIES):
-        priorities[cat] = cols[i % 3].slider(cat, 0.0, 2.0, 1.0, 0.25, key=f"priority_{cat}")
-
-def pair_score(add, drop):
-    score = 0.0
-    details = []
-    for cat in CATEGORIES:
-        if cat in ("FG%", "FT%"):
-            delta = pct_impact(add, drop, cat)
-            # Scale percentage-point differences to a comparable rough contribution.
-            scaled = delta / 0.02
-            score += scaled * priorities[cat]
-            details.append((cat, delta, scaled))
-        else:
-            delta = directions[cat] * (player_value(add, cat) - player_value(drop, cat))
-            scaled = delta / scales[cat]
-            score += scaled * priorities[cat]
-            details.append((cat, delta, scaled))
-    return score, details
-
+st.subheader("Potential add/drop moves")
+min_gain = st.slider("Minimum overall-rank improvement", min_value=0, max_value=100, value=10, step=5,
+                     help="For example, a free agent ranked 35 versus a roster player ranked 80 is a 45-place improvement.")
+ranked_roster = roster[roster["overall_rank"].notna()].copy()
+ranked_fa = free_agents[free_agents["overall_rank"].notna()].copy()
 results = []
-for _, add in free_agents.iterrows():
-    for _, drop in roster.iterrows():
-        score, details = pair_score(add, drop)
-        improved = [cat for cat, delta, _ in details if delta > 0]
-        harmed = [cat for cat, delta, _ in details if delta < 0]
-        results.append({
-            "Add": add["player_name"], "Drop": drop["player_name"], "Score": score,
-            "Add Yahoo ID": add["yahoo_id"], "Drop slot": drop.get("roster_slot", ""),
-            "Improved categories": ", ".join(improved) or "—",
-            "Potential costs": ", ".join(harmed) or "—",
-            "_add": add, "_drop": drop, "_details": details
-        })
-results.sort(key=lambda x: x["Score"], reverse=True)
+for _, add in ranked_fa.iterrows():
+    for _, drop in ranked_roster.iterrows():
+        gain = float(drop["overall_rank"]) - float(add["overall_rank"])
+        if gain >= min_gain:
+            results.append({
+                "Free agent to add": add["player_name"],
+                "FA rank": int(add["overall_rank"]),
+                "Roster player to consider dropping": drop["player_name"],
+                "Roster rank": int(drop["overall_rank"]),
+                "Rank improvement": int(gain),
+                "Drop roster slot": drop.get("roster_slot", ""),
+                "FA position": add.get("position", ""),
+                "Roster position": drop.get("position", ""),
+            })
 
-# De-duplicate to show top candidate per add, then offer all pairings.
-best_by_add = {}
-for r in results:
-    if r["Add"] not in best_by_add:
-        best_by_add[r["Add"]] = r
-top = sorted(best_by_add.values(), key=lambda x: x["Score"], reverse=True)
-view = pd.DataFrame([{
-    "Add": r["Add"], "Drop": r["Drop"], "Roster slot": r["Drop slot"],
-    "Heuristic score": round(r["Score"], 2),
-    "Categories helped": r["Improved categories"],
-    "Possible sacrifices": r["Potential costs"]
-} for r in top[:20]])
-st.dataframe(view, use_container_width=True, hide_index=True)
+if results:
+    result_df = pd.DataFrame(results).sort_values(
+        ["Rank improvement", "FA rank"], ascending=[False, True]
+    ).reset_index(drop=True)
+    st.caption(f"Showing {len(result_df)} ranked add/drop pair(s) meeting the {min_gain}-place improvement threshold. These are rank-based flags, not automatic drop instructions.")
+    st.dataframe(result_df.head(100), use_container_width=True, hide_index=True)
+    st.download_button("Download all suggested add/drop pairs as CSV", result_df.to_csv(index=False),
+                       file_name="rotoballer_add_drop_suggestions.csv", mime="text/csv")
+else:
+    st.info("No ranked free agent beats a roster player by the selected rank-improvement threshold.")
 
-chosen = st.selectbox("Inspect a suggested move", [f"{r['Add']}  ⇄  {r['Drop']}" for r in top[:50]])
-if chosen:
-    selected = next(r for r in top[:50] if f"{r['Add']}  ⇄  {r['Drop']}" == chosen)
-    st.markdown(f"**Add {selected['Add']} for {selected['Drop']}**")
-    detail_rows = []
-    for cat, delta, scaled in selected["_details"]:
-        if cat in ("FG%", "FT%"):
-            label = f"{delta:+.3f} weighted rate"
-        else:
-            label = f"{delta:+.1f} per-game stat delta"
-        detail_rows.append({"Category": cat, "Estimated direction": label, "Weighted contribution": round(scaled * priorities[cat], 2)})
-    st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+unranked_roster = roster[roster["overall_rank"].isna()][["player_name", "roster_slot"]]
+unranked_fa = free_agents[free_agents["overall_rank"].isna()][["player_name"]]
+if not unranked_roster.empty or not unranked_fa.empty:
+    with st.expander("Unranked players (not included in comparisons)", expanded=False):
+        if not unranked_roster.empty:
+            st.write("**Roster players without an overall rank**")
+            st.dataframe(unranked_roster, use_container_width=True, hide_index=True)
+        if not unranked_fa.empty:
+            st.write("**Free agents without an overall rank**")
+            st.dataframe(unranked_fa, use_container_width=True, hide_index=True)
 
-st.caption("Scores are ranking heuristics, not guaranteed matchup outcomes. RotoBaller projections are forecasts, not guarantees. Use your league standings, games played, injuries, and weekly schedule before making a move.")
+st.caption("Rankings reflect the selected RotoBaller view and update time. This comparison does not account for category needs, injuries, games played, schedule, or roster constraints. Review context before making a move.")
