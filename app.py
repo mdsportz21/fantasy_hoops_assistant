@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -6,7 +7,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Fantasy Hoops Add/Drop Assistant", layout="wide")
 st.title("Fantasy Hoops Add/Drop Assistant")
-st.caption("Yahoo 9-category league · personal-use prototype")
+st.caption("Yahoo 9-category league · RotoBaller projection-aware add/drop assistant")
 
 ROOT = Path(__file__).parent
 CATEGORIES = ["FG%", "FT%", "3PTM", "PTS", "REB", "AST", "STL", "BLK", "TO"]
@@ -19,61 +20,34 @@ def read_csv_upload(uploaded, default_name):
         return pd.read_csv(path, dtype=str).fillna("")
     return pd.DataFrame()
 
-
 def parse_player_row(row):
     """Parse a single Yahoo row_data string using shooting-attempt cells as anchors."""
+    # pandas Series.apply passes each cell value (a string), not the entire row.
     raw = str(row if row is not None else "")
-    cells = [
-        x.strip()
-        for x in raw.replace("\r", "\n").replace("\n", " | ").split("|")
-    ]
-    cells = [
-        re.sub(r"\s+", " ", x).strip()
-        for x in cells
-    ]
-
-    attempts = [
-        i for i, cell in enumerate(cells)
-        if re.fullmatch(r"\d+(?:\.\d+)?/\d+(?:\.\d+)?", cell)
-    ]
-
+    cells = [x.strip() for x in raw.replace("\r", "\n").replace("\n", " | ").split("|")]
+    cells = [re.sub(r"\s+", " ", x).strip() for x in cells]
+    attempts = [i for i, cell in enumerate(cells) if re.fullmatch(r"\d+(?:\.\d+)?/\d+(?:\.\d+)?", cell)]
     if len(attempts) < 2:
         return None
-
     i_fg, i_ft = attempts[0], attempts[1]
-
     try:
-        fgm, fga = map(float, cells[i_fg].split("/"))
+        fgm, fga = [float(x) for x in cells[i_fg].split("/")]
         fg_pct = float(cells[i_fg + 1])
-
-        ftm, fta = map(float, cells[i_ft].split("/"))
+        ftm, fta = [float(x) for x in cells[i_ft].split("/")]
         ft_cell = cells[i_ft + 1]
-        ft_pct = (
-            float(ft_cell)
-            if ft_cell not in ("-", "")
-            else (ftm / fta if fta else 0.0)
-        )
-
-        tail = [
-            float(cells[j])
-            for j in range(i_ft + 2, i_ft + 9)
-        ]
-
+        ft_pct = float(ft_cell) if ft_cell not in ("-", "") else (ftm / fta if fta else 0.0)
+        tail = [float(cells[j]) for j in range(i_ft + 2, i_ft + 9)]
         if len(tail) != 7:
             return None
-
         threes, pts, reb, ast, stl, blk, tov = tail
-
         return {
             "FGM": fgm, "FGA": fga, "FG%": fg_pct,
             "FTM": ftm, "FTA": fta, "FT%": ft_pct,
-            "3PTM": threes, "PTS": pts, "REB": reb,
-            "AST": ast, "STL": stl, "BLK": blk, "TO": tov,
+            "3PTM": threes, "PTS": pts, "REB": reb, "AST": ast,
+            "STL": stl, "BLK": blk, "TO": tov,
         }
-
     except (ValueError, IndexError):
         return None
-
 
 def clean_and_parse(df, is_roster=False):
     if df.empty:
@@ -95,34 +69,135 @@ def clean_and_parse(df, is_roster=False):
         out["roster_slot"] = ""
     return out.reset_index(drop=True)
 
+# def normalized_name(value):
+#     value = str(value or "").lower().strip()
+#     value = re.sub(r"[^a-z0-9 ]", "", value)
+#     value = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", value)
+#     return re.sub(r"\s+", " ", value).strip()
+
+def normalized_name(name):
+    """Normalize player names for matching across Yahoo and RotoBaller."""
+    if not name:
+        return ""
+
+    # Convert accented characters to their unaccented equivalents.
+    name = unicodedata.normalize("NFKD", str(name))
+    name = "".join(
+        char for char in name
+        if not unicodedata.combining(char)
+    )
+
+    name = name.lower().strip()
+    name = name.replace("&", "and")
+    name = re.sub(r"[^a-z0-9\s]", "", name)
+    name = re.sub(r"\s+", " ", name)
+
+    # Remove common suffixes.
+    name = re.sub(r"\s+(jr|sr|ii|iii|iv|v)$", "", name)
+
+    return name.strip()
+
+def pct_to_ratio(value):
+    try:
+        number = float(str(value).replace("%", "").strip())
+        return number / 100 if number > 1 else number
+    except (TypeError, ValueError):
+        return float("nan")
+
+def load_projections(uploaded, raw):
+    if uploaded is None and raw is None:
+        return pd.DataFrame()
+    try:
+        proj = pd.read_csv(uploaded, dtype=str).fillna("") if uploaded is not None else raw
+    except Exception as exc:
+        st.error(f"Could not read projections CSV: {exc}")
+        return pd.DataFrame()
+    # Accept common RotoBaller header variants.
+    aliases = {
+        "player": "player_name", "name": "player_name", "player name": "player_name", "player_name": "player_name",
+        "3pm": "3PTM", "3ptm": "3PTM", "three pointers": "3PTM",
+        "pts": "PTS", "reb": "REB", "ast": "AST", "stl": "STL",
+        "blk": "BLK", "to": "TO", "fg%": "FG%", "ft%": "FT%"
+    }
+    rename = {}
+    for col in proj.columns:
+        key = re.sub(r"\s+", " ", str(col).strip().lower())
+        if key in aliases:
+            rename[col] = aliases[key]
+    proj = proj.rename(columns=rename)
+    needed = ["player_name", "PTS", "REB", "AST", "STL", "BLK", "3PTM", "FG%", "FT%", "TO"]
+    missing = [c for c in needed if c not in proj.columns]
+    if missing:
+        st.error("Projections CSV is missing required columns: " + ", ".join(missing))
+        st.caption("Expected columns: player_name, PTS, REB, AST, STL, BLK, 3PTM, FG%, FT%, TO. RotoBaller's 3PM column is accepted as 3PTM.")
+        return pd.DataFrame()
+    proj = proj[needed].copy()
+    proj["_name_key"] = proj["player_name"].map(normalized_name)
+    for col in ["PTS", "REB", "AST", "STL", "BLK", "3PTM", "TO"]:
+        proj[col] = pd.to_numeric(proj[col].astype(str).str.replace(",", "", regex=False), errors="coerce")
+    for col in ["FG%", "FT%"]:
+        proj[col] = proj[col].map(pct_to_ratio)
+    proj = proj[proj["_name_key"].ne("")].drop_duplicates("_name_key", keep="last")
+    return proj
+
 def pct_impact(add, drop, cat):
-    # Percentage categories are volume-weighted: compare aggregate makes/attempts.
-    if cat == "FG%":
-        makes = roster["FGM"].sum() - drop["FGM"] + add["FGM"]
-        attempts = roster["FGA"].sum() - drop["FGA"] + add["FGA"]
-        old_makes, old_attempts = roster["FGM"].sum(), roster["FGA"].sum()
-    else:
-        makes = roster["FTM"].sum() - drop["FTM"] + add["FTM"]
-        attempts = roster["FTA"].sum() - drop["FTA"] + add["FTA"]
-        old_makes, old_attempts = roster["FTM"].sum(), roster["FTA"].sum()
-    old = old_makes / old_attempts if old_attempts else 0
-    new = makes / attempts if attempts else 0
+    # Use RotoBaller projected percentages when available. Yahoo attempts are
+    # used as volume weights because the RotoBaller table does not expose makes/attempts.
+    attempt_col = "FGA" if cat == "FG%" else "FTA"
+    old_attempts = roster[attempt_col].sum()
+    def rate(player):
+        projected = player.get(f"proj_{cat}", float("nan"))
+        return float(projected) if pd.notna(projected) else float(player[cat])
+    old_weighted = sum(rate(row) * float(row[attempt_col]) for _, row in roster.iterrows())
+    new_attempts = old_attempts - float(drop[attempt_col]) + float(add[attempt_col])
+    new_weighted = old_weighted - rate(drop) * float(drop[attempt_col]) + rate(add) * float(add[attempt_col])
+    old = old_weighted / old_attempts if old_attempts else 0
+    new = new_weighted / new_attempts if new_attempts else 0
     return new - old
 
+def player_value(player, cat):
+    projected = player.get(f"proj_{cat}", float("nan"))
+    return float(projected) if pd.notna(projected) else float(player[cat])
+
 st.write(
-    "Upload your latest Yahoo exports, or use the included files as a starting point. "
-    "The parser extracts FG/FT makes and attempts plus the seven counting categories."
+    "Upload your latest Yahoo exports and, optionally, a RotoBaller projections CSV. "
+    "When projections are loaded, they drive the counting-stat comparison and projected FG%/FT% rates; Yahoo attempts are used as approximate volume weights for percentages."
 )
 c1, c2 = st.columns(2)
 with c1:
     roster_upload = st.file_uploader("Roster CSV", type="csv", key="roster")
 with c2:
     fa_upload = st.file_uploader("Free agents CSV", type="csv", key="free_agents")
+projection_upload = st.file_uploader("RotoBaller projections CSV (optional)", type="csv", key="projections")
 
 roster_raw = read_csv_upload(roster_upload, "output/roster.csv")
 fa_raw = read_csv_upload(fa_upload, "output/free_agents.csv")
+projection_raw = read_csv_upload(projection_upload, "output/rotoballer_projections.csv")
 roster = clean_and_parse(roster_raw, True)
 free_agents = clean_and_parse(fa_raw, False)
+projections = load_projections(projection_upload, projection_raw)
+
+if not projections.empty:
+    proj_rename = {cat: f"proj_{cat}" for cat in CATEGORIES}
+    projections = projections.rename(columns=proj_rename)
+    proj_cols = [f"proj_{cat}" for cat in CATEGORIES]
+    if not roster.empty:
+        roster["_name_key"] = roster["player_name"].map(normalized_name)
+        roster = roster.merge(projections[["_name_key"] + proj_cols], on="_name_key", how="left")
+    if not free_agents.empty:
+        free_agents["_name_key"] = free_agents["player_name"].map(normalized_name)
+        free_agents = free_agents.merge(projections[["_name_key"] + proj_cols], on="_name_key", how="left")
+    roster_matches = int(roster["proj_PTS"].notna().sum()) if not roster.empty else 0
+    free_agent_matches = int(free_agents["proj_PTS"].notna().sum()) if not free_agents.empty else 0
+    st.success(f"RotoBaller projections loaded: matched {roster_matches}/{len(roster)} roster players and {free_agent_matches}/{len(free_agents)} free agents by normalized name.")
+    if roster_matches < len(roster) or free_agent_matches < len(free_agents):
+        st.warning("Some players did not match RotoBaller names and will fall back to Yahoo-export stats. Review spelling/suffixes if important players are unmatched.")
+        print(f'projection names: {projections['player_name'].tolist()}')
+        roster_nonmatches = roster[roster['proj_PTS'].isna()]['player_name'].tolist()
+        print(f'roster nonmatches: {roster_nonmatches}')
+        free_agent_nonmatches = free_agents[free_agents['proj_PTS'].isna()]['player_name'].tolist()
+        print(f'free agent nonmatches: {free_agent_nonmatches}')
+
 
 # Keep only players whose IDs are not already on the roster.
 if not roster.empty and not free_agents.empty:
@@ -162,12 +237,10 @@ st.dataframe(pd.DataFrame(profile), use_container_width=True, hide_index=True)
 
 st.subheader("Add/drop shortlist")
 st.caption(
-    "Heuristic, not a projection model: compares each free agent with each roster player using the supplied per-game-looking stats. "
-    "FG% and FT% use makes/attempts to avoid incorrectly averaging percentages. Counting stats are treated as higher-is-better except TO."
+    "If RotoBaller projections are uploaded, projected per-game counting stats are used where a player match exists. FG%/FT% use projected rates weighted by Yahoo-export FGA/FTA as an approximation; exact projected makes/attempts are not available in the imported RotoBaller table. Without projections, the app falls back to the Yahoo-export stats. TO is lower-is-better."
 )
 st.warning(
-    "Data quality note: Yahoo's row export contains page metadata mixed into each row. This app anchors on the FGM/FGA and FTM/FTA cells, "
-    "but verify the selected Yahoo stats view before acting. These figures may not be season averages or projections."
+    "Data quality note: Yahoo export rows can include page metadata. Verify the selected Yahoo stats view. RotoBaller projections are matched by normalized player name; unmatched players use Yahoo stats, so check the match counts above."
 )
 
 # Estimate each category's value in roster context using robust standardization across available player pool.
@@ -177,14 +250,11 @@ raw_cols = {"FG%": "FG%", "FT%": "FT%", "3PTM": "3PTM", "PTS": "PTS", "REB": "RE
 # Use standard deviation across players as a rough scale for unlike categories.
 scales = {}
 for cat, col in raw_cols.items():
-    s = pd.to_numeric(pool[col], errors="coerce").dropna()
+    s = pool.apply(lambda row: player_value(row, cat), axis=1).dropna() if not pool.empty else pd.Series(dtype=float)
     scales[cat] = float(s.std()) if len(s) > 1 and float(s.std()) > 1e-9 else 1.0
 
 def cat_score(player, cat):
-    if cat in ("FG%", "FT%"):
-        # Use percentage itself for per-player contribution proxy; pair-specific impact is separately volume weighted.
-        return float(player[cat]) * directions[cat]
-    return float(player[cat]) * directions[cat]
+    return player_value(player, cat) * directions[cat]
 
 # Category preference lets the user emphasize categories they want to win.
 with st.expander("Customize category priorities", expanded=True):
@@ -205,7 +275,7 @@ def pair_score(add, drop):
             score += scaled * priorities[cat]
             details.append((cat, delta, scaled))
         else:
-            delta = directions[cat] * (float(add[cat]) - float(drop[cat]))
+            delta = directions[cat] * (player_value(add, cat) - player_value(drop, cat))
             scaled = delta / scales[cat]
             score += scaled * priorities[cat]
             details.append((cat, delta, scaled))
@@ -253,4 +323,4 @@ if chosen:
         detail_rows.append({"Category": cat, "Estimated direction": label, "Weighted contribution": round(scaled * priorities[cat], 2)})
     st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
 
-st.caption("Scores are ranking heuristics, not guaranteed matchup outcomes. Use your league standings, games played, injuries, and weekly schedule before making a move.")
+st.caption("Scores are ranking heuristics, not guaranteed matchup outcomes. RotoBaller projections are forecasts, not guarantees. Use your league standings, games played, injuries, and weekly schedule before making a move.")

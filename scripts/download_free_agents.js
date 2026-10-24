@@ -1,3 +1,4 @@
+// https://basketball.fantasysports.yahoo.com/nba/59643/players
 const tables = [...document.querySelectorAll("table")];
 
 const table = tables

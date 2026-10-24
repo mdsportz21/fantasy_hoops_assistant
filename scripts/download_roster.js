@@ -1,3 +1,4 @@
+// https://basketball.fantasysports.yahoo.com/nba/59643/3
 (() => {
   const tableIndex = 1;
   const table = document.querySelectorAll("table")[tableIndex];
