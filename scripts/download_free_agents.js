@@ -1,4 +1,20 @@
+// Yahoo Fantasy Basketball Free-Agent Exporter
+// Go to:
 // https://basketball.fantasysports.yahoo.com/nba/59643/players
+//
+// Set
+//
+//
+// Exports:
+// player_name, yahoo_id, current_rank, row_data
+//
+// IMPORTANT:
+// Based on the inspected Yahoo table:
+//   cell index 6 = Pre-Season
+//   cell index 7 = Current
+//
+// Copies the CSV to the clipboard using Chrome DevTools' copy() function.
+
 const tables = [...document.querySelectorAll("table")];
 
 const table = tables
@@ -11,7 +27,8 @@ const table = tables
 if (!table) {
   console.error("No player table found.");
 } else {
-  const rows = [...table.querySelectorAll("tr")];
+
+  const rows = [...table.querySelectorAll("tbody tr")];
 
   const records = rows.map(row => {
     const link = [...row.querySelectorAll('a[href*="/nba/players/"]')]
@@ -21,27 +38,63 @@ if (!table) {
 
     const cells = [...row.querySelectorAll("th, td")];
     const id = link.href.match(/\/nba\/players\/(\d+)/)?.[1] || "";
-    const name = link.innerText.trim();
-    const values = cells.map(c => c.innerText.trim());
 
-    return { name, id, values };
+    // Extract the player name, removing Yahoo's appended note text.
+    const name = link.innerText
+      .trim()
+      .replace(/\s*(?:Player Note|New Player Note|No new player Notes).*$/is, "")
+      .trim();
+
+    const values = cells.map(cell =>
+      cell.innerText.trim().replace(/\s+/g, " ")
+    );
+
+    const currentRankText = (values[7] || "").trim();
+    const currentRank = /^\d+$/.test(currentRankText)
+      ? Number(currentRankText)
+      : null;
+
+    return {
+      name,
+      id,
+      current_rank: currentRank,
+      values
+    };
   }).filter(Boolean);
 
   const quote = value =>
     `"${String(value ?? "").replace(/"/g, '""')}"`;
 
   const csv = [
-    ["player_name", "yahoo_id", "row_data"].map(quote).join(","),
-    ...records.map(p =>
-      [p.name, p.id, p.values.join(" | ")].map(quote).join(",")
+    ["player_name", "yahoo_id", "current_rank", "row_data"]
+      .map(quote)
+      .join(","),
+
+    ...records.map(player =>
+      [
+        player.name,
+        player.id,
+        player.current_rank ?? "",
+        player.values.join(" | ")
+      ].map(quote).join(",")
     )
   ].join("\n");
 
   copy(csv);
-  console.log(`Copied ${records.length} player rows to clipboard.`);
-  console.table(records.slice(0, 5).map(p => ({
-    name: p.name,
-    yahoo_id: p.id,
-    row: p.values.join(" | ").slice(0, 120)
+
+  const rankedCount = records.filter(
+    player => player.current_rank !== null
+  ).length;
+
+  console.log(
+    `Copied ${records.length} player rows to clipboard; ` +
+    `${rankedCount} have a numeric Current ranking.`
+  );
+
+  console.table(records.slice(0, 10).map(player => ({
+    player_name: player.name,
+    yahoo_id: player.id,
+    current_rank: player.current_rank,
+    row_data: player.values.join(" | ").slice(0, 120)
   })));
 }
